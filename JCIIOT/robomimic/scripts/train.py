@@ -173,14 +173,19 @@ def train(config, device, resume=False):
     # maybe retreve statistics for normalizing actions
     action_normalization_stats = trainset.get_action_normalization_stats()
 
-    # initialize data loaders
+    # initialize data loaders (pin_memory / persistent_workers for higher GPU util)
+    _num_workers = int(config.train.num_data_workers)
+    torch.backends.cudnn.benchmark = True
     train_loader = DataLoader(
         dataset=trainset,
         sampler=train_sampler,
         batch_size=config.train.batch_size,
         shuffle=(train_sampler is None),
-        num_workers=config.train.num_data_workers,
-        drop_last=True
+        num_workers=_num_workers,
+        drop_last=True,
+        pin_memory=bool(config.train.cuda),
+        persistent_workers=_num_workers > 0,
+        prefetch_factor=4 if _num_workers > 0 else None,
     )
 
     if config.experiment.validate:

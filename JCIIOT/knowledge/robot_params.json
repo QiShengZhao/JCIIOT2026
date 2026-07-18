@@ -13,8 +13,8 @@
     "max_steps": 3000,
     "waypoint_tolerance": 0.01,
     "settle_steps": 5,
-    "max_linear": 0.70,
-    "max_angular": 1.20,
+    "max_linear": 0.7,
+    "max_angular": 1.2,
     "k_linear": 1.2,
     "k_angular": 1.8,
     "holonomic_base": true,
@@ -25,8 +25,8 @@
   },
   "grasp_policy": {
     "_comment": "BC 抓取策略参数 —— 控制基于行为克隆的抓取执行",
-    "checkpoint_path": "robosuite/robosuite/model_epoch_500.pth",
-    "checkpoint_fallback_path": "robosuite/robosuite/model_epoch_150.pth",
+    "checkpoint_path": "trained_models/l1_grasp_bc/train_20260718050701/l1_grasp_bc/20260718050712/models/model_epoch_500.pth",
+    "checkpoint_fallback_path": "trained_models/l1_grasp_bc/train_20260718050701/l1_grasp_bc/20260718050712/models/model_epoch_500.pth",
     "eval_steps": 360,
     "post_hold_steps": 5,
     "initial_view_steps": 5,
@@ -40,7 +40,7 @@
     "max_steps": 300,
     "hold_steps": 20,
     "tolerance": 0.02,
-    "max_action": 0.80
+    "max_action": 0.8
   },
   "turn": {
     "_comment": "转向参数 —— 放置前机器人面向目标站的转向控制",

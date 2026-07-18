@@ -513,13 +513,18 @@ def make_eval_env(args, config, ckpt_dict, render):
 
     shape_meta = ckpt_dict["shape_metadata"]
     env_name = factory_scene_env_name(args)
+    # Collect scripts store robosuite images as-is (no vertical flip). Keep policy
+    # observations aligned with HDF5 used for BC training.
+    env_kwargs = make_factory_sorting_env_kwargs(args)
+    env_kwargs.pop("flip_visual_obs", None)
     env = EnvRobosuite(
         env_name=env_name,
         render=render,
         render_offscreen=True,
         use_image_obs=shape_meta.get("use_images", True),
         use_depth_obs=shape_meta.get("use_depths", False),
-        **make_factory_sorting_env_kwargs(args),
+        flip_visual_obs=False,
+        **env_kwargs,
     )
     print(f"Evaluation factory scene: {env_name}")
     env = EnvUtils.wrap_env_from_config(env, config=config)

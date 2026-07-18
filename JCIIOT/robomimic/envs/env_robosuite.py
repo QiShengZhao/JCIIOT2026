@@ -52,6 +52,7 @@ class EnvRobosuite(EB.EnvBase):
         use_image_obs=False, 
         use_depth_obs=False, 
         lang=None,
+        flip_visual_obs=True,
         **kwargs,
     ):
         """
@@ -73,8 +74,13 @@ class EnvRobosuite(EB.EnvBase):
                 observations are not required.
 
             lang: language descripton for the environment
+
+            flip_visual_obs (bool): if True (robomimic default), flip rgb/depth vertically in
+                get_observation. FactorySorting demos in this repo are saved unflipped from
+                robosuite `_get_observations`, so eval should pass False to match training.
         """
         self.use_depth_obs = use_depth_obs
+        self.flip_visual_obs = bool(flip_visual_obs)
 
         # robosuite version check
         self._is_v1 = (robosuite.__version__.split(".")[0] == "1")
@@ -251,11 +257,12 @@ class EnvRobosuite(EB.EnvBase):
         ret = {}
         for k in di:
             if (k in ObsUtils.OBS_KEYS_TO_MODALITIES) and ObsUtils.key_is_obs_modality(key=k, obs_modality="rgb"):
-                # by default images from mujoco are flipped in height
-                ret[k] = di[k][::-1].copy()
+                # robomimic default: flip mujoco rgb; disable when demos were stored unflipped
+                img = di[k]
+                ret[k] = (img[::-1].copy() if self.flip_visual_obs else np.array(img))
             elif (k in ObsUtils.OBS_KEYS_TO_MODALITIES) and ObsUtils.key_is_obs_modality(key=k, obs_modality="depth"):
-                # by default depth images from mujoco are flipped in height
-                ret[k] = di[k][::-1].copy()
+                depth = di[k]
+                ret[k] = (depth[::-1].copy() if self.flip_visual_obs else np.array(depth))
                 if len(ret[k].shape) == 2:
                     ret[k] = ret[k][..., None] # (H, W, 1)
                 assert len(ret[k].shape) == 3 

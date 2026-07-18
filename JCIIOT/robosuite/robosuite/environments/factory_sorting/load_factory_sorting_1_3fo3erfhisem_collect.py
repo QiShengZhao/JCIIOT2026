@@ -883,9 +883,17 @@ def gather_successful_demonstrations_as_hdf5(
         ep_data_grp = grp.create_group(f"demo_{num_eps}")
         with open(os.path.join(ep_path, "model.xml"), "r") as xml_file:
             ep_data_grp.attrs["model_file"] = xml_file.read()
+        actions_arr = np.array(actions)
+        n_samples = int(len(actions_arr))
+        ep_data_grp.attrs["num_samples"] = n_samples
         ep_data_grp.create_dataset("states", data=np.array(states))
-        ep_data_grp.create_dataset("actions", data=np.array(actions))
-        write_obs_group(ep_data_grp, obs_data, len(actions))
+        ep_data_grp.create_dataset("actions", data=actions_arr)
+        # robomimic SequenceDataset expects these keys / attrs
+        ep_data_grp.create_dataset("rewards", data=np.zeros((n_samples, 1), dtype=np.float32))
+        ep_data_grp.create_dataset("dones", data=np.zeros((n_samples, 1), dtype=np.float32))
+        if n_samples > 0:
+            ep_data_grp["dones"][-1] = 1.0
+        write_obs_group(ep_data_grp, obs_data, n_samples)
 
     now = datetime.datetime.now()
     grp.attrs["date"] = f"{now.month}-{now.day}-{now.year}"
