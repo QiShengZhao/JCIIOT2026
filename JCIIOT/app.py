@@ -66,7 +66,7 @@ DEFAULT_OPENAI_BASE_URL = _llm_defaults.get("openai_base_url", "https://api.deep
 DEFAULT_OPENAI_MODEL = _llm_defaults.get("openai_model", "deepseek-chat")
 DEFAULT_VISION_MODEL = _llm_defaults["vision_model"]
 AUTO_GENERATE_REPLAY_GIFS = False
-SCORE_RULE_VERSION = "grasp_success_gate_l5_multi_v2"
+SCORE_RULE_VERSION = "official_departure_arrival_v3"
 
 L5_INPUT1_OBJECTS = (
     "white_tote_b01_left_center",
@@ -1724,31 +1724,51 @@ def _l5_match_object(event_object: str, tracked_objects: list[str]) -> str | Non
     return None
 
 
-def _l5_left_source_after_grasp(
+def _l5_object_spawn_xy(frames: list, object_name: str):
+    """First-frame (spawn) XY for an object, or None if never present."""
+    for frame in frames:
+        if not isinstance(frame, dict):
+            continue
+        pos = _trajectory_object_position(frame.get("object_positions", {}), object_name)
+        if pos is not None:
+            return (float(pos[0]), float(pos[1]))
+    return None
+
+
+def _l5_departed_from_spawn(
     frames: list,
     object_name: str,
-    src_xy,
-    start_frame: int,
+    spawn_xy,
 ) -> tuple[bool, float | None, float | None]:
+    """Official departure check: object moves >1m in x OR y from its spawn.
+
+    Scanned over the whole trajectory (not gated on a grasp frame), so a
+    transported object counts regardless of how it was moved.
+    """
+    if spawn_xy is None:
+        return False, None, None
     last_dx = None
     last_dy = None
-    start_frame = max(0, min(int(start_frame), max(0, len(frames) - 1)))
-
-    for frame in frames[start_frame:]:
+    for frame in frames:
         if not isinstance(frame, dict):
             continue
         pos = _trajectory_object_position(frame.get("object_positions", {}), object_name)
         if pos is None:
             continue
-        last_dx = abs(pos[0] - float(src_xy[0]))
-        last_dy = abs(pos[1] - float(src_xy[1]))
+        last_dx = abs(pos[0] - float(spawn_xy[0]))
+        last_dy = abs(pos[1] - float(spawn_xy[1]))
         if last_dx > 1.0 or last_dy > 1.0:
             return True, last_dx, last_dy
     return False, last_dx, last_dy
 
 
 def _score_l5_multi_object(task_index: int, src_xy, tgt_xy, tgt_z: float) -> dict:
-    """L5 scores the three white totes on input_1 independently."""
+    """L5 scores the three white totes on input_1 independently.
+
+    Official rule per object: departure (>1m from spawn) + arrival (<0.8m of
+    target), each worth 5. Not gated on grasp success. -5 once if any
+    collision occurs during the task.
+    """
     empty = {"total": 0, "items": []}
     source_name = _task_source_name(task_index)
     target_name = _task_target_name(task_index)
@@ -1803,22 +1823,16 @@ def _score_l5_multi_object(task_index: int, src_xy, tgt_xy, tgt_z: float) -> dic
     ]
 
     for object_name in tracked_objects:
-        grasped = object_name in grasp_frame_by_object
-        left_ok = False
-        left_dx = None
-        left_dy = None
-        if grasped:
-            left_ok, left_dx, left_dy = _l5_left_source_after_grasp(
-                frames,
-                object_name,
-                src_xy,
-                grasp_frame_by_object[object_name],
-            )
+        grasped = object_name in grasp_frame_by_object  # info only, not a gate
+
+        # Departure measured from the object's own spawn position.
+        spawn_xy = _l5_object_spawn_xy(frames, object_name)
+        left_ok, left_dx, left_dy = _l5_departed_from_spawn(frames, object_name, spawn_xy)
 
         final_pos = _trajectory_object_position(last_positions, object_name)
         dist_tgt = None
         placed_ok = False
-        if grasped and final_pos is not None:
+        if final_pos is not None:
             dist_tgt = float(np.linalg.norm(np.array(final_pos[:2]) - tgt_xy))
             placed_ok = dist_tgt < 0.80
 
@@ -1833,16 +1847,16 @@ def _score_l5_multi_object(task_index: int, src_xy, tgt_xy, tgt_z: float) -> dic
 
         items.append({
             "label": (
-                f"L5 {object_name}: grasped and left {source_name} "
-                f"(grasp={'yes' if grasped else 'no'}, dx_src={dx_text}, dy_src={dy_text})"
+                f"L5 {object_name}: departure >1m from spawn "
+                f"(dx={dx_text}, dy={dy_text}, grasp={'yes' if grasped else 'no'})"
             ),
             "score": 5,
             "ok": left_ok,
         })
         items.append({
             "label": (
-                f"L5 {object_name}: placed at {target_name} "
-                f"(grasp={'yes' if grasped else 'no'}, {dist_text}, {final_text})"
+                f"L5 {object_name}: arrival <0.8m of {target_name} "
+                f"({dist_text}, {final_text}, grasp={'yes' if grasped else 'no'})"
             ),
             "score": 5,
             "ok": placed_ok,
@@ -1913,93 +1927,107 @@ def _score_steps(task_index: int) -> dict:
     except Exception:
         return empty
 
-    # 鈹€鈹€ Read object positions from the LAST TRAJECTORY FRAME 鈹€鈹€
-    # A fresh env reset sends objects back to spawn; use trajectory JSON instead.
+    # ── Read object positions from the trajectory JSON ──
+    # Official rule (Competition Description):
+    #   Departure : object moves > 1 m in x OR y from its start position.
+    #   Arrival   : object final (x, y) within 0.8 m of the target table center.
+    # Neither part is gated on grasp success — a transported object scores
+    # regardless of how it was moved. grasp_success is kept for the debug
+    # label only (informational), never as a gate.
     grasp_success = False
     try:
         import json as _json
         _last_traj = st.session_state.get("_last_trajectory")
-        if _last_traj and Path(_last_traj).exists():
-            with open(_last_traj, "r") as _f:
-                _traj = _json.load(_f)
-            _events = _traj.get("events", [])
-            if isinstance(_events, list):
-                for _event in _events:
-                    if not isinstance(_event, dict) or _event.get("name") != "grasp_end":
-                        continue
-                    _event_source = str(_event.get("source") or "")
-                    _event_object = str(_event.get("object_name") or "")
-                    _source_ok = not _event_source or _event_source == _SRC_NAMES[task_index]
-                    _object_ok = (
-                        not obj_hint
-                        or not _event_object
-                        or obj_hint in _event_object
-                        or _event_object in obj_hint
-                    )
-                    _success_value = _event.get("success")
-                    _success_ok = _event_success_value(_success_value)
-                    if _source_ok and _object_ok and _success_ok:
-                        grasp_success = True
-                        break
-            _frames = _traj.get("frames", [])
-            if _frames:
-                # Last frame has the final object positions
-                _last_frame = _frames[-1]
-                _obj_positions = _last_frame.get("object_positions", {})
-                # Find the right object
-                px = py = pz = None
-                for obj_name, pos in _obj_positions.items():
-                    if obj_hint and obj_hint in obj_name:
-                        px, py, pz = float(pos[0]), float(pos[1]), float(pos[2])
-                        best_obj = obj_name
-                        break
-                if px is None and _obj_positions:
-                    # Pick the one nearest to target
-                    best_dist = float("inf")
-                    for obj_name, pos in _obj_positions.items():
-                        d = float(np.linalg.norm(np.array(pos[:2]) - tgt_xy))
-                        if d < best_dist:
-                            best_dist, best_obj = d, obj_name
-                            px, py, pz = float(pos[0]), float(pos[1]), float(pos[2])
-                if px is None:
-                    return empty
-            else:
-                return empty
-        else:
+        if not (_last_traj and Path(_last_traj).exists()):
             return empty
+        with open(_last_traj, "r") as _f:
+            _traj = _json.load(_f)
+
+        _events = _traj.get("events", [])
+        if isinstance(_events, list):
+            for _event in _events:
+                if not isinstance(_event, dict) or _event.get("name") != "grasp_end":
+                    continue
+                _event_source = str(_event.get("source") or "")
+                _event_object = str(_event.get("object_name") or "")
+                _source_ok = not _event_source or _event_source == _SRC_NAMES[task_index]
+                _object_ok = (
+                    not obj_hint
+                    or not _event_object
+                    or obj_hint in _event_object
+                    or _event_object in obj_hint
+                )
+                if _source_ok and _object_ok and _event_success_value(_event.get("success")):
+                    grasp_success = True
+                    break
+
+        _frames = _traj.get("frames", [])
+        if not _frames:
+            return empty
+
+        # Resolve the tracked object name once, then read its spawn (first
+        # frame it appears in) and final (last frame) positions. Departure is
+        # measured from the true spawn position, not the station center.
+        _last_positions = _frames[-1].get("object_positions", {}) if isinstance(_frames[-1], dict) else {}
+        best_obj = None
+        px = py = pz = None
+        for obj_name, pos in _last_positions.items():
+            if obj_hint and obj_hint in obj_name:
+                best_obj = obj_name
+                px, py, pz = float(pos[0]), float(pos[1]), float(pos[2])
+                break
+        if px is None and _last_positions:
+            best_dist = float("inf")
+            for obj_name, pos in _last_positions.items():
+                d = float(np.linalg.norm(np.array(pos[:2]) - tgt_xy))
+                if d < best_dist:
+                    best_dist, best_obj = d, obj_name
+                    px, py, pz = float(pos[0]), float(pos[1]), float(pos[2])
+        if px is None:
+            return empty
+
+        # Spawn position = first frame in which this object appears.
+        spawn_xy = None
+        for _frame in _frames:
+            if not isinstance(_frame, dict):
+                continue
+            _sp = _trajectory_object_position(_frame.get("object_positions", {}), best_obj)
+            if _sp is not None:
+                spawn_xy = np.array([_sp[0], _sp[1]], dtype=float)
+                break
+        if spawn_xy is None:
+            # Fall back to the source station center if spawn is unavailable.
+            spawn_xy = np.array(src_xy[:2], dtype=float)
     except Exception:
         return empty
 
-    # 鈹€鈹€ Compute distances first 鈹€鈹€
-    dx_src = abs(px - src_xy[0])
-    dy_src = abs(py - src_xy[1])
-    dist_tgt = float(np.linalg.norm(np.array([px, py]) - tgt_xy))  # XY only, z checked separately
+    # ── Compute displacement (from spawn) and arrival distance (to target) ──
+    dx_src = abs(px - spawn_xy[0])
+    dy_src = abs(py - spawn_xy[1])
+    dist_tgt = float(np.linalg.norm(np.array([px, py]) - tgt_xy))  # XY only
 
-    # 鈹€鈹€ Debug: dump coordinates 鈹€鈹€
     try:
-        debug_lines = [
-            f"Object x={px:.3f} y={py:.3f} z={pz:.3f}",
+        st.session_state["_score_debug"] = [
+            f"Object {best_obj} x={px:.3f} y={py:.3f} z={pz:.3f}",
+            f"Spawn  x={spawn_xy[0]:.3f} y={spawn_xy[1]:.3f}",
             f"Target x={tgt_xy[0]:.3f} y={tgt_xy[1]:.3f} z={_tgt_z:.3f}",
-            f"dist_xy: {dist_tgt:.3f}m",
-            f"grasp_success: {grasp_success}",
+            f"departure dx={dx_src:.3f}m dy={dy_src:.3f}m | arrival dist={dist_tgt:.3f}m",
+            f"grasp_success (info only): {grasp_success}",
         ]
-        st.session_state["_score_debug"] = debug_lines
     except Exception:
         st.session_state["_score_debug"] = []
 
-    # 鈹€鈹€ Score: 2 checkpoints 鈹€鈹€
-    _half = max(1, _max // 2)
-    _w_leave = _half
+    # ── Score: 2 checkpoints, each half, no grasp gate ──
+    _w_leave = max(1, _max // 2)
     _w_place = _max - _w_leave
 
-    left_source_position = dx_src > 1.0 or dy_src > 1.0
-    left_source = grasp_success and left_source_position
-    on_target_table = grasp_success and dist_tgt < 0.80
+    left_source = dx_src > 1.0 or dy_src > 1.0   # departure
+    on_target_table = dist_tgt < 0.80            # arrival
 
     items = [
-        {"label": f"Grasp success & left source (grasp={'yes' if grasp_success else 'no'}, dx_src={dx_src:.2f}m, dy_src={dy_src:.2f}m)",
+        {"label": f"Successful departure: object moved >1m from spawn (dx={dx_src:.2f}m, dy={dy_src:.2f}m)",
          "score": _w_leave, "ok": left_source},
-        {"label": f"Object reached target table after grasp (grasp={'yes' if grasp_success else 'no'}, dist={dist_tgt:.2f}m, x={px:.2f}, y={py:.2f}, z={pz:.2f})",
+        {"label": f"Successful arrival: object within 0.8m of target (dist={dist_tgt:.2f}m, x={px:.2f}, y={py:.2f}, z={pz:.2f})",
          "score": _w_place, "ok": on_target_table},
     ]
     total = sum(it["score"] for it in items if it["ok"])
