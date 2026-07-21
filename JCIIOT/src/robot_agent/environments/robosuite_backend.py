@@ -346,12 +346,14 @@ class RobosuiteBackend:
         self._wrapped_env = None
         self._nav_env = None
         has_physics = getattr(self, "_has_physics", False)
-        # Nav env: viewer on for physics, offscreen always available
-        show_win = has_physics
+        # Nav env: viewer on for physics, offscreen always available.
+        # Never open an on-screen window when the backend is headless
+        # (e.g. container without X11) — offscreen egl rendering still works.
+        show_win = has_physics and not self._headless
         self._env = _make_env(
             self._env_name, robots=self._robots, camera=self._camera,
             headless=not show_win, control_freq=self._control_freq, seed=self._seed,
-            force_offscreen=show_win,
+            force_offscreen=has_physics,
             use_camera_obs=False, camera_names="agentview",
             camera_heights=256, camera_widths=256,
         )
@@ -1002,7 +1004,7 @@ class RobosuiteBackend:
         )
         wrapped = make_eval_env(
             ns, config=self._physics_config,
-            ckpt_dict=self._physics_ckpt_dict, render=True,
+            ckpt_dict=self._physics_ckpt_dict, render=not self._headless,
         )
 
         # Dump ALL BC policy inputs for debugging
@@ -1029,6 +1031,16 @@ class RobosuiteBackend:
                 except: pass
 
         grasp_raw = base_robosuite_env(wrapped)
+        # Compute forward kinematics so site_xpos (grasp-site world coords) is
+        # populated before the scripted grasp reads it. Without this the sites
+        # read stale local-ish values (e.g. ~0.29 instead of the true ~7.35),
+        # so the grasp aims at the wrong target and fails. make_eval_env does
+        # not reset/forward on its own; the smoke path calls env.reset() which
+        # is why it worked there.
+        try:
+            grasp_raw.sim.forward()
+        except Exception as exc:
+            logger.warning("grasp env sim.forward() failed: %s", exc)
         # Set grasp window to robotview
         try:
             _set_viewer_camera(grasp_raw, "robot0_robotview", render_once=True)

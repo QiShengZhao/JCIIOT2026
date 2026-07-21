@@ -24,7 +24,8 @@
     "control_freq": 20
   },
   "grasp_policy": {
-    "_comment": "BC 抓取策略参数 —— 控制基于行为克隆的抓取执行",
+    "_comment": "抓取策略：mode=scripted 用采集脚本侧抓（L1可靠）；mode=bc 用 checkpoint BC",
+    "mode": "scripted",
     "checkpoint_path": "trained_models/l1_grasp_bc/train_20260718050701/l1_grasp_bc/20260718050712/models/model_epoch_500.pth",
     "checkpoint_fallback_path": "trained_models/l1_grasp_bc/train_20260718050701/l1_grasp_bc/20260718050712/models/model_epoch_500.pth",
     "eval_steps": 360,
