@@ -4,9 +4,9 @@
     "_comment": "LLM 大模型配置 —— 控制任务规划和视觉理解的模型接入",
     "ollama_base_url": "http://localhost:11434",
     "ollama_model": "qwen3.6:27b-mtp-q4_K_M",
-    "vision_model": "qwen3-vl:8b",
-    "openai_base_url": "https://api.deepseek.com",
-    "openai_model": "deepseek-chat"
+    "vision_model": "GLM-5V-Turbo",
+    "openai_base_url": "https://open.bigmodel.cn/api/paas/v4",
+    "openai_model": "glm-5.2"
   },
   "navigation": {
     "_comment": "导航参数 —— 控制底盘移动的速度、精度和模式",

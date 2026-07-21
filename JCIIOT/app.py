@@ -30,6 +30,28 @@ if str(_SRC_DIR) not in sys.path:
 if str(_APP_DIR) not in sys.path:
     sys.path.insert(0, str(_APP_DIR))
 
+
+def _load_dotenv(path: Path) -> None:
+    """Minimal .env loader (no python-dotenv dep). Only sets vars that are
+    not already present in the environment, so real env vars win. Keeps API
+    keys out of committed config — .env is gitignored."""
+    try:
+        if not path.exists():
+            return
+        for _line in path.read_text(encoding="utf-8").splitlines():
+            _line = _line.strip()
+            if not _line or _line.startswith("#") or "=" not in _line:
+                continue
+            _k, _, _v = _line.partition("=")
+            _k, _v = _k.strip(), _v.strip().strip('"').strip("'")
+            if _k and _k not in os.environ:
+                os.environ[_k] = _v
+    except Exception:
+        pass
+
+
+_load_dotenv(_APP_DIR / ".env")
+
 # Purge any cached v2 robot_agent modules
 for _m in list(sys.modules):
     if _m.startswith("robot_agent"):

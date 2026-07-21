@@ -967,12 +967,30 @@ class RobosuiteBackend:
             if f"line_{_i}" not in _GRASP_POSE and f"input_{_i}" in _GRASP_POSE:
                 _GRASP_POSE[f"line_{_i}"] = _GRASP_POSE[f"input_{_i}"]
 
-        # Use LLM-supplied XY but force correct yaw from config
+        # Prefer a fully-supplied pose (xy + yaw). The yaw matters for grasp
+        # approach: y-split container sites want the base facing ±x, x-split
+        # tote sites want it facing ±y. A caller that derives the pose from the
+        # actual grasp-site geometry supplies the correct yaw, so honour it.
+        # Only fall back to the config yaw when the supplied pose has no yaw
+        # (e.g. an LLM gave XY only, where the table value is safer).
         _trained_pose = _GRASP_POSE.get(source)
         _initial_pose = self._normalize_grasp_initial_base_pose(initial_base_pose)
-        if _initial_pose is not None and _trained_pose is not None:
+        _supplied_yaw = None
+        if isinstance(initial_base_pose, dict):
+            _yv = initial_base_pose.get("yaw", initial_base_pose.get("base_world_yaw"))
+            if _yv is not None:
+                try:
+                    _supplied_yaw = float(_yv)
+                except (TypeError, ValueError):
+                    _supplied_yaw = None
+        if _initial_pose is not None and _supplied_yaw is not None:
             _grasp_pos = _initial_pose[0]
-            _grasp_ori = _trained_pose[1]  # force correct yaw from config
+            _grasp_ori = [0.0, 0.0, _supplied_yaw]  # honour caller's derived yaw
+            logger.info("grasp_object_physics: using supplied pose (%.3f,%.3f,yaw=%.3f)",
+                        _grasp_pos[0], _grasp_pos[1], _grasp_ori[2])
+        elif _initial_pose is not None and _trained_pose is not None:
+            _grasp_pos = _initial_pose[0]
+            _grasp_ori = _trained_pose[1]  # supplied XY only → config yaw
             logger.info("grasp_object_physics: using supplied XY + config yaw (%.3f,%.3f,yaw=%.3f)",
                         _grasp_pos[0], _grasp_pos[1], _grasp_ori[2])
         elif _initial_pose is not None:
@@ -1183,6 +1201,22 @@ class RobosuiteBackend:
         if _ok:
             # Record post-grasp+lift frame
             self._record_trajectory_frame()
+            # Align nav_env base to the grasp pose BEFORE capturing the transport
+            # attachment. capture_transport_attachment stores the object's offset
+            # in the base frame using nav_env's current base yaw; if nav_env is
+            # still at the A*-stop orientation (not the grasp orientation), the
+            # offset is computed against the wrong yaw and the object gets pinned
+            # to the robot's side (e.g. 1.6m off), then dropped behind the robot
+            # at place time. Setting the base to the grasp pose makes the offset
+            # the true "in front" vector (matches L1).
+            try:
+                _nav_robot = nav_env.robots[0]
+                _set_base_xy_direct(nav_env, _nav_robot,
+                                    np.asarray(_grasp_pos[:2], dtype=float))
+                _set_base_world_yaw_direct(nav_env, _nav_robot, float(_grasp_ori[2]))
+                nav_env.sim.forward()
+            except Exception as exc:
+                logger.warning("align nav base to grasp pose failed: %s", exc)
             try:
                 capture_transport_attachment(nav_env, obj_name)
                 logger.info("transport_attach: obj=%s held", obj_name)
@@ -1234,18 +1268,32 @@ class RobosuiteBackend:
         )
 
         station_name, station = self._find_output_station_entry(target)
-        if station is None:
-            logger.warning(
-                "place_object_physics: no output station matching '%s'. Available: %s",
-                target, sorted(self.env.output_ports.keys()),
-            )
-            return False
-
-        # Use the station center only as a facing target, not as the drop XY.
+        # Some scenes only instantiate output_1..4 in the MuJoCo env even though
+        # the task target is output_5/6. The semantic map (scene_context) still
+        # has the correct coordinates for those stations, and scoring only cares
+        # about the object's final xy vs the target center — so fall back to the
+        # map station instead of bailing when the env has no matching port.
         _scene = getattr(self, "_scene_context", None)
         scene_station = None
         if _scene is not None:
-            scene_station = _scene.output_ports.get(station_name or target) or _scene.output_ports.get(target)
+            scene_station = (
+                _scene.output_ports.get(station_name or target)
+                or _scene.output_ports.get(target)
+            )
+        if station is None and scene_station is None:
+            logger.warning(
+                "place_object_physics: no output station matching '%s' in env %s or map.",
+                target, sorted(self.env.output_ports.keys()),
+            )
+            return False
+        if station is None:
+            logger.info(
+                "place_object_physics: '%s' not in env ports %s; using map coords (%.2f,%.2f).",
+                target, sorted(self.env.output_ports.keys()),
+                float(scene_station.center[0]), float(scene_station.center[1]),
+            )
+
+        # Use the station center only as a facing target, not as the drop XY.
         if scene_station is not None:
             target_xy = scene_station.center[:2].copy()
         else:
@@ -1296,7 +1344,14 @@ class RobosuiteBackend:
             release_clearance = _pp["release_clearance"]
             start_z = float(start_qpos[2])
             target_z = max(0.05, start_z - lower_delta)
-            table_top_z = self._output_table_top_z(target, station_name, station)
+            # station may be None when we fell back to the map station; pass the
+            # scene-station center (or empty dict) so table-top lookup is safe.
+            _station_for_z = station
+            if _station_for_z is None:
+                _station_for_z = (
+                    {"center": list(scene_station.center)} if scene_station is not None else {}
+                )
+            table_top_z = self._output_table_top_z(target, station_name, _station_for_z)
             bottom_offset_z = self._object_bottom_offset_z(held_name)
             if table_top_z is not None and bottom_offset_z is not None:
                 safe_release_z = max(0.05, table_top_z - bottom_offset_z + release_clearance)

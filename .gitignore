@@ -1,0 +1,6 @@
+
+# LLM secrets — never commit API keys
+.env
+.env.local
+**/.env
+**/.env.local
