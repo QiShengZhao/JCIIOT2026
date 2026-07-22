@@ -1211,9 +1211,17 @@ class RobosuiteBackend:
             # the true "in front" vector (matches L1).
             try:
                 _nav_robot = nav_env.robots[0]
+                # Order matters: set_base_xy_direct computes the qpos delta
+                # needed to reach the target world-xy using the qpos->world
+                # mapping AT THE CURRENT YAW. If yaw is changed afterward, the
+                # same forward/side qpos values map to a different world xy
+                # under the new yaw, silently shifting the base off the
+                # intended point (observed drift ~0.2m on this rig). Setting
+                # yaw first, then xy, means the xy step is computed in the
+                # final orientation and lands exactly on target.
+                _set_base_world_yaw_direct(nav_env, _nav_robot, float(_grasp_ori[2]))
                 _set_base_xy_direct(nav_env, _nav_robot,
                                     np.asarray(_grasp_pos[:2], dtype=float))
-                _set_base_world_yaw_direct(nav_env, _nav_robot, float(_grasp_ori[2]))
                 nav_env.sim.forward()
             except Exception as exc:
                 logger.warning("align nav base to grasp pose failed: %s", exc)

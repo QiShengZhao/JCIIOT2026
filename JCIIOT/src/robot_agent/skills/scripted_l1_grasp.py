@@ -133,42 +133,24 @@ def run_scripted_grasp_in_wrapped_env(
             max(starts[arm][2] for arm in C.ARMS),
             max(site_positions[arm][2] + args.site_above_clearance for arm in C.ARMS),
         )
-        # For x-split totes the initial end-effectors sit flush with the tote's
-        # near wall, so a pure vertical safe-lift scrapes the wall/top edge.
-        # Retract each arm along the approach axis (horizontally, away from the
-        # sites) before lifting, so the lift path clears the object. The sites
-        # share one approach-axis coordinate (x or y); retract along whichever
-        # axis the eef→site separation is largest (the approach direction).
+        # x-split totes: the caller (run_l1_fixed_plan.py) stands the base at a
+        # bbox-edge-relative standoff (0.55m from the object's collision
+        # bounding box, on the side the grasp sites face) so BOTH default
+        # end-effectors already clear the object before any motion — verified
+        # via the actual grasp-env creation path (robot_base_pos/ori applied
+        # atomically at reset). No horizontal retract is needed: a retract
+        # shim here previously pulled the arms in the wrong direction (the
+        # axis/sign heuristic doesn't generalise) and re-introduced the exact
+        # collision it was meant to avoid. Keep safe_z low and just above the
+        # sites — the grasp start point already clears the object.
         if _is_tote:
-            # Totes are grasped from the side, arms already near site height.
-            # Do NOT lift high: raising safe_z makes the arm reach up and the
-            # end-effector pitches FORWARD into the tote's front wall (observed
-            # eef y crossed the wall when safe_z was ~1.7). Keep safe_z just
-            # above the grasp sites, and FIRST retract the arms straight back
-            # (away from the object) at their current height, then a small lift,
-            # so the wall is cleared horizontally before any vertical motion.
             safe_z = max(
                 max(starts[arm][2] for arm in C.ARMS),
                 max(site_positions[arm][2] for arm in C.ARMS) + 0.03,
             )
-            RETRACT = 0.22
-            for arm in C.ARMS:
-                sep = site_positions[arm][:2] - starts[arm][:2]
-                axis = 0 if abs(sep[0]) > abs(sep[1]) else 1
-                direction = -np.sign(sep[axis]) if sep[axis] != 0 else -1.0
-                retract_start = starts[arm].copy()
-                retract_start[axis] += direction * RETRACT
-                starts[arm] = retract_start
-            safe_targets = {
-                arm: np.array([starts[arm][0], starts[arm][1], safe_z]) for arm in C.ARMS
-            }
-            print(f"[scripted_grasp] tote retract, safe_targets "
-                  f"R={np.round(safe_targets[_r],3).tolist()} L={np.round(safe_targets[_l],3).tolist()} "
-                  f"safe_z={safe_z:.3f}")
-        else:
-            safe_targets = {
-                arm: np.array([starts[arm][0], starts[arm][1], safe_z]) for arm in C.ARMS
-            }
+        safe_targets = {
+            arm: np.array([starts[arm][0], starts[arm][1], safe_z]) for arm in C.ARMS
+        }
         xy_targets = {
             arm: np.array([site_positions[arm][0], site_positions[arm][1], safe_z])
             for arm in C.ARMS

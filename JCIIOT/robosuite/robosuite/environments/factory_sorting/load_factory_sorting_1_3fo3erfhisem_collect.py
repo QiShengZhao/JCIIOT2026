@@ -27,6 +27,12 @@ if str(ROOT) not in sys.path:
 
 import robosuite as suite  # noqa: E402
 from robosuite.controllers import load_composite_controller_config  # noqa: E402
+from robosuite.environments.factory_sorting.transport_attachment import (  # noqa: E402
+    get_base_world_pose,
+)
+from robosuite.environments.factory_sorting.turn_to_station import (  # noqa: E402
+    lock_base_xy,
+)
 from robosuite.environments.factory_sorting.factory_sorting_1_3fo3erfhisem import (  # noqa: E402
     FactorySorting1_3FO3ERFHISEM,
 )
@@ -481,6 +487,19 @@ def move_along_linear_segment(
 ):
     num_steps = max(1, int(num_steps))
     starts = {arm: get_eef_pos(base_env, robot, arm) for arm in ARMS}
+    # Anchor the base at its current xy for the duration of this segment. When
+    # the base stands close enough to a station/object to grasp it, the wheels
+    # are frequently in contact with the scene's `scene_aabb_proxy_*` judge-
+    # collision geometry (which covers the full ground footprint of pick
+    # stations). MuJoCo's contact solver then continuously pushes the whole
+    # robot body — confirmed by observing drift with a zero-delta arm command
+    # — silently dragging the arm off its commanded world-frame target over
+    # the course of a multi-step segment (a short single-step move rarely
+    # accumulates enough drift to notice, which is why this went unnoticed
+    # elsewhere). `lock_base_xy` re-teleports the base back to its start xy
+    # and zeroes its velocity after every physics step, the same pattern
+    # `turn_to_face_xy` already uses during the place sequence.
+    locked_base_xy, _ = get_base_world_pose(base_env, robot)
     for step in range(1, num_steps + 1):
         alpha = step / float(num_steps)
         targets = {arm: starts[arm] + alpha * (goal_targets[arm] - starts[arm]) for arm in ARMS}
@@ -495,6 +514,7 @@ def move_along_linear_segment(
             args=args,
             obs_buffer=obs_buffer,
         )
+        lock_base_xy(base_env, robot, locked_base_xy)
         if reject_object_contact and gripper_touches_object(base_env, robot, object_name):
             return False, f"gripper touched object during {label} at step {step}"
 
@@ -517,6 +537,7 @@ def move_along_linear_segment(
                 args=args,
                 obs_buffer=obs_buffer,
             )
+            lock_base_xy(base_env, robot, locked_base_xy)
             if reject_object_contact and gripper_touches_object(base_env, robot, object_name):
                 return False, f"gripper touched object during {label} settle at step {settle_step}"
             distances = {

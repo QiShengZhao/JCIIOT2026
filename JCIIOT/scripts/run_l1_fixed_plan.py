@@ -117,9 +117,26 @@ def main() -> int:
                 return None
         return out
 
+    def _object_bbox_xy(be, name):
+        """World-xy bounding box of the object's *_col_* collision geoms."""
+        raw = be.env
+        m, d = raw.sim.model, raw.sim.data
+        xs, ys = [], []
+        for i in range(m.ngeom):
+            gname = m.geom_id2name(i)
+            if gname and name in gname and "col" in gname:
+                c = d.geom_xpos[i]
+                s = m.geom_size[i]
+                xs += [c[0] - s[0], c[0] + s[0]]
+                ys += [c[1] - s[1], c[1] + s[1]]
+        if not xs:
+            return None
+        return {"xlo": min(xs), "xhi": max(xs), "ylo": min(ys), "yhi": max(ys)}
+
     OFFSET = 0.94  # L1-proven stand-off distance from object to base
     obj_xy = _object_xy(backend, obj)
     sites = _grasp_sites_xy(backend, obj)
+    bbox = _object_bbox_xy(backend, obj)
     _gp = task_cfg.get("grasp_poses", {}).get(source, {})
     grasp_pose = None
     if obj_xy is not None and sites is not None:
@@ -138,19 +155,56 @@ def main() -> int:
             yaw = _gp.get("yaw", -3.139453) if _gp else -3.139453
             kind = "container/y-split face -x"
         else:                         # x-split → tote approach along y
-            # Sites sit on one y-face of the tote (offset from the object
-            # centre in y). Stand on that same side and face the object so the
-            # arms spread along x onto the two sites. Standoff 0.55 puts the
-            # end-effectors ~0.2m from the sites (measured) — the reachable
-            # window is narrow (0.65 already leaves the arms short), so the
-            # safe-lift phase is what must clear the object, handled in the grasp
-            # script by lifting above the object top for x-split totes.
+            # Standoff (L2-proven: 0.55m from the object's collision bbox edge
+            # nearest the sites, facing the object) clears the gripper's own
+            # geometry — it extends ~0.10m past the eef reference point along
+            # the approach axis, so a standoff that only clears the eef point
+            # still leaves the fingers inside the object.
+            #
+            # L3/L5 remain UNRESOLVED at any standoff — this is a scene-geometry
+            # conflict, not a fixable offset. This scene's `scene_aabb_proxy_
+            # input_*` collision proxy (used for official collision scoring)
+            # covers the entire ground-level footprint of the pick station.
+            # Standing close enough to reach the grasp-site HEIGHT (~1.52m)
+            # keeps the wheels inside that proxy, and the resulting contact
+            # continuously pushes the whole robot body (confirmed: a zero-delta
+            # arm command drifts identically to a real lift command, and
+            # `judge_collision_detected: robot_geom=wheel` fires every step),
+            # suppressing the arm's max reachable height to ~1.20m — well short
+            # of the site. Standing far enough for the wheels to clear the
+            # proxy (measured ~1.5m further) restores full height reach but
+            # puts the sites ~1.2m out of horizontal arm reach. No standoff
+            # satisfies both constraints simultaneously for this tote's
+            # geometry in this scene. (`move_along_linear_segment` in
+            # load_factory_sorting_1_3fo3erfhisem_collect.py now re-anchors the
+            # base every step during grasp primitives via `lock_base_xy`, the
+            # same pattern `turn_to_face_xy` already used for the place
+            # sequence — this measurably improves precision, e.g. L2 arrival
+            # dropped from 0.40m to 0.04m, but does not fix the L3/L5 reach
+            # conflict since re-anchoring position doesn't restore the arm's
+            # suppressed vertical range.)
+            #
+            # Verified via the actual grasp env creation path (robot_base_pos/
+            # ori applied atomically at reset), which is not subject to the
+            # qpos-teleport ordering pitfall of set_base_xy_direct/
+            # set_base_world_yaw_direct (those two must be called yaw-before-xy
+            # or the xy silently drifts — see robosuite_backend.py
+            # grasp_object_physics for the same fix, needed there too).
             TOTE_OFFSET = 0.55
-            side = 1.0 if site_c[1] < obj_xy[1] else -1.0  # sites on -y → stand further -y
-            base_y = float(site_c[1]) - side * TOTE_OFFSET
-            yaw = 1.570796 if side > 0 else -1.570796      # face +y (toward object)
+            if bbox is not None:
+                near_site_is_lo = abs(site_c[1] - bbox["ylo"]) < abs(site_c[1] - bbox["yhi"])
+                if near_site_is_lo:
+                    base_y = bbox["ylo"] - TOTE_OFFSET
+                    yaw = 1.570796   # face +y, toward the object
+                else:
+                    base_y = bbox["yhi"] + TOTE_OFFSET
+                    yaw = -1.570796  # face -y, toward the object
+            else:
+                side = 1.0 if site_c[1] < obj_xy[1] else -1.0
+                base_y = float(site_c[1]) - side * 0.55
+                yaw = 1.570796 if side > 0 else -1.570796
             base_xy = [float(site_c[0]), base_y]
-            kind = f"tote/x-split face {'+y' if side > 0 else '-y'}"
+            kind = f"tote/x-split bbox-edge standoff={TOTE_OFFSET}"
         grasp_pose = {"xy": base_xy, "yaw": yaw}
         print(f"grasp pose [{kind}] obj=({obj_xy[0]:.2f},{obj_xy[1]:.2f}) "
               f"sites R={sites['right'].round(2).tolist()} L={sites['left'].round(2).tolist()} "
